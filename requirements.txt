@@ -1,2 +1,5 @@
-streamlit>=1.45,<2.0
-pandas>=2.0.0
+streamlit>=1.64,<2.0
+gspread>=6.1,<7.0
+google-auth>=2.30,<3.0
+pandas>=2.2,<3.0
+plotly>=7.0,<8.0
