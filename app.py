@@ -1,893 +1,907 @@
+from __future__ import annotations
+
+import hashlib
 import io
-import zipfile
-from pathlib import Path
+import re
+import uuid
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
+import gspread
+import pandas as pd
+import plotly.express as px
 import streamlit as st
+from google.oauth2.service_account import Credentials
+from gspread.exceptions import APIError, WorksheetNotFound
 
-
-# =========================================================
-#  기술·가정 수업 OT 게임
-#  AI Studio 스타일 UI를 Streamlit로 재구성한 단일 파일 버전
-# =========================================================
-
-st.set_page_config(
-    page_title="기술·가정 수업 OT 게임",
-    page_icon="📘",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
-# -----------------------------
-# 기본 데이터
-# -----------------------------
-QUESTIONS = [
-    {
-        "q": "\"스마트폰으로 집안의 조명, 냉난방, 도어락을 원격 제어하는 '스마트홈'\"",
-        "hint": "이것은 기술일까요, 가정일까요, 아니면 융합일까요?",
-        "answer": "융합",
-        "explain": "스마트홈은 센서·통신·제어 같은 기술과 주거·생활 방식이 결합된 사례입니다.",
-    },
-    {
-        "q": "\"식품의 영양성분표를 비교해 우리 가족에게 맞는 식품을 고르는 활동\"",
-        "hint": "어느 영역의 핵심 활동에 가까울까요?",
-        "answer": "가정",
-        "explain": "식생활과 가족의 건강·소비를 판단하는 활동으로 가정생활 영역과 관련이 깊습니다.",
-    },
-    {
-        "q": "\"3D 프린터로 부서진 생활용품의 부품을 직접 설계해 다시 만드는 활동\"",
-        "hint": "기술, 가정, 융합 중 하나를 골라 보세요.",
-        "answer": "기술",
-        "explain": "제품 설계와 제작, 문제 해결 과정이 중심이므로 기술 영역의 대표 사례로 볼 수 있습니다.",
-    },
-    {
-        "q": "\"에너지 사용량을 앱으로 확인하고 가족이 전기 절약 계획을 세우는 활동\"",
-        "hint": "기술과 생활이 함께 사용됩니다. 핵심 성격은?",
-        "answer": "융합",
-        "explain": "에너지 데이터를 측정·분석하는 기술과 가정의 생활 습관 변화가 함께 작동합니다.",
-    },
-    {
-        "q": "\"옷의 소재와 세탁 방법을 확인하고 계절에 맞춰 의생활 계획을 세우는 활동\"",
-        "hint": "생활 속 어떤 교과 영역에 더 가깝나요?",
-        "answer": "가정",
-        "explain": "의생활의 선택·관리·계획은 가정생활 영역의 중요한 내용입니다.",
-    },
-    {
-        "q": "\"아두이노 센서를 이용해 교실의 온도와 습도를 자동으로 측정하는 장치 만들기\"",
-        "hint": "제품을 설계하고 작동시키는 것이 핵심입니다.",
-        "answer": "기술",
-        "explain": "센서, 제어, 장치 설계와 제작을 직접 다루는 기술 중심 활동입니다.",
-    },
-    {
-        "q": "\"가족회의에서 우리 집의 안전 문제를 찾고 IoT 기기로 개선 방법을 설계하는 활동\"",
-        "hint": "두 영역이 결합된 사례입니다. 무엇일까요?",
-        "answer": "융합",
-        "explain": "가정의 문제를 발견하고 기술을 적용해 해결하므로 기술·가정의 융합 성격이 강합니다.",
-    },
-    {
-        "q": "\"한 달 생활비를 정하고 식비·교통비·저축비의 우선순위를 정하는 활동\"",
-        "hint": "생활 자원 관리와 관련된 영역을 생각해 보세요.",
-        "answer": "가정",
-        "explain": "가족의 자원 관리와 합리적인 소비 계획은 가정생활의 핵심 주제입니다.",
-    },
-    {
-        "q": "\"태양광 패널을 설치할 장소를 정하고 가정의 전력 사용 패턴까지 분석하는 프로젝트\"",
-        "hint": "기술적 해결과 생활 설계가 함께 들어 있습니다.",
-        "answer": "융합",
-        "explain": "에너지 기술과 실제 가정의 생활·자원 관리가 함께 연결된 융합형 프로젝트입니다.",
-    },
-    {
-        "q": "\"간단한 목공 공구의 사용법을 익혀 책상 정리용 선반을 설계하고 제작하는 활동\"",
-        "hint": "설계와 제작이 중심이라면 어디에 가까울까요?",
-        "answer": "기술",
-        "explain": "문제 해결을 위한 설계·제작과 공구 활용이 중심이므로 기술 영역의 활동입니다.",
-    },
+# ============================================================
+# 기본 설정
+# ============================================================
+APP_TITLE = "기술·가정 포트폴리오"
+WEEKS = list(range(1, 18))
+KST = ZoneInfo("Asia/Seoul")
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
 ]
 
-CHOICES = [
-    ("기술", "🛠️", "Technology", "제조 · 건설 · 수송 · 정보통신"),
-    ("가정", "🍲", "Home Ec.", "인간발달 · 식생활 · 의생활 · 주생활"),
-    ("융합", "✨", "기술 + 가정", "첨단기술과 라이프스타일의 결합"),
-]
-
-MODULES = [
-    ("1. 기술 vs 가정 분류", "🛠️"),
-    ("2. 기-가 듀얼빌", "📖"),
-    ("3. 생존 밸런스 로그", "⚖️"),
-    ("4. 안전 수칙 & 리더십", "📋"),
-    ("5. Streamlit GitHub 코드 & ZIP", "🛒"),
-]
-
-
-# -----------------------------
-# 상태 초기화
-# -----------------------------
-defaults = {
-    "module": 0,
-    "question_index": 0,
-    "score": 0,
-    "answers": {},
-    "selected": None,
-    "show_result": False,
-    "complete": False,
-}
-for key, value in defaults.items():
-    if key not in st.session_state:
-        st.session_state[key] = value
-
-
-# -----------------------------
-# 디자인 CSS
-# -----------------------------
-st.markdown(
-    """
-<style>
-/* ===== 전체 ===== */
-html, body, [class*="css"] {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
-                 "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
-}
-.stApp {
-    background: #f7f8fb;
-    color: #111827;
-}
-.block-container {
-    max-width: 1080px;
-    padding-top: 0.0rem;
-    padding-bottom: 2.5rem;
+SHEET_CONFIG = {
+    "학생명단": ["학번", "이름", "학년", "반", "번호"],
+    "주차설정": ["주차", "학습목표", "활동지질문"],
+    "포트폴리오": [
+        "제출ID",
+        "학번",
+        "주차",
+        "제출내용",
+        "점수",
+        "피드백",
+        "제출일시",
+        "수정일시",
+        "상태",
+    ],
 }
 
-/* Streamlit chrome 최소화 */
-[data-testid="stSidebar"] { display: none; }
-[data-testid="stHeader"] {
-    background: transparent;
-}
-[data-testid="stToolbar"] {
-    display: none;
-}
 
-/* ===== 상단 공지 바 ===== */
-.top-banner {
-    width: 100vw;
-    margin-left: calc((100vw - 100%) / -2);
-    min-height: 28px;
-    background: linear-gradient(90deg, #ef001d 0%, #f40036 47%, #ee7600 100%);
-    color: white;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 10px;
-    font-size: 10.5px;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    box-shadow: 0 1px 0 rgba(0,0,0,.04);
-}
-.top-banner .tag {
-    padding: 3px 8px;
-    border-radius: 6px;
-    background: rgba(255,255,255,.16);
-    border: 1px solid rgba(255,255,255,.22);
-}
-.top-banner .dot {
-    opacity: .55;
-}
-
-/* ===== 브랜드 영역 ===== */
-.brand-row {
-    padding: 10px 0 8px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-}
-.brand-left {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-}
-.brand-logo {
-    width: 32px;
-    height: 32px;
-    border-radius: 9px;
-    display: grid;
-    place-items: center;
-    background: #5142ea;
-    color: white;
-    font-size: 18px;
-    font-weight: 800;
-    box-shadow: 0 4px 12px rgba(81,66,234,.20);
-}
-.brand-title {
-    font-size: 18px;
-    font-weight: 800;
-    color: #111827;
-    letter-spacing: -0.045em;
-}
-.brand-sub {
-    font-size: 10px;
-    color: #98a2b3;
-    margin-top: 1px;
-    letter-spacing: -0.02em;
-}
-.badge {
-    display: inline-block;
-    margin-left: 6px;
-    vertical-align: 2px;
-    padding: 2px 6px;
-    border: 1px solid #dbe3ff;
-    border-radius: 999px;
-    color: #5142ea;
-    background: #f3f4ff;
-    font-size: 9px;
-    font-weight: 800;
-}
-.download-wrap {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-/* ===== nav ===== */
-.nav-strip {
-    border-top: 1px solid #e8ebf0;
-    border-bottom: 1px solid #dfe5ed;
-    padding: 3px 0 4px;
-    margin-bottom: 18px;
-}
-.nav-note {
-    text-align: right;
-    font-size: 10px;
-    color: #7d8797;
-    margin-top: 2px;
-}
-
-/* Streamlit buttons */
-.stButton > button, .stDownloadButton > button {
-    border-radius: 8px !important;
-    border: 1px solid #e0e5ee !important;
-    background: #ffffff !important;
-    color: #344054 !important;
-    min-height: 30px !important;
-    padding: 4px 10px !important;
-    font-size: 11px !important;
-    font-weight: 700 !important;
-    box-shadow: none !important;
-    transition: all .16s ease !important;
-}
-.stButton > button:hover, .stDownloadButton > button:hover {
-    border-color: #bfc8d8 !important;
-    transform: translateY(-1px);
-}
-.stButton > button:focus {
-    box-shadow: 0 0 0 2px rgba(81,66,234,.10) !important;
-}
-
-/* ===== 진행도 ===== */
-.progress-shell {
-    background: #ffffff;
-    border: 1px solid #e2e7ef;
-    border-radius: 13px;
-    padding: 11px 13px 12px;
-    box-shadow: 0 4px 12px rgba(16,24,40,.035);
-    margin-bottom: 10px;
-}
-.progress-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-}
-.progress-pill {
-    background: #eef2ff;
-    color: #4f46e5;
-    font-size: 10px;
-    font-weight: 800;
-    padding: 4px 7px;
-    border-radius: 999px;
-}
-.score-label {
-    color: #667085;
-    font-size: 10px;
-}
-.score-number {
-    color: #3f36c5;
-    font-weight: 900;
-}
-.progress-track {
-    height: 7px;
-    border-radius: 999px;
-    background: #edf0f5;
-    overflow: hidden;
-    margin-top: 11px;
-}
-.progress-fill {
-    height: 100%;
-    border-radius: 999px;
-    background: linear-gradient(90deg,#5142ea,#6a60f2);
-}
-
-/* ===== 문제 카드 ===== */
-.question-card {
-    background: #ffffff;
-    border: 1px solid #dfe4eb;
-    border-radius: 15px;
-    padding: 26px 25px 27px;
-    box-shadow: 0 10px 24px rgba(16,24,40,.045);
-}
-.q-meta {
-    text-align: center;
-    color: #8a94a6;
-    font-size: 10px;
-    font-weight: 700;
-}
-.q-title {
-    text-align: center;
-    font-size: 20px;
-    line-height: 1.38;
-    font-weight: 800;
-    color: #101828;
-    margin: 7px auto 5px;
-    letter-spacing: -0.055em;
-}
-.q-hint {
-    text-align: center;
-    color: #8c96a8;
-    font-size: 10px;
-    margin-bottom: 17px;
-}
-.choice-card {
-    min-height: 96px;
-    background: #fff;
-    border: 1px solid #dde4ee;
-    border-radius: 11px;
-    padding: 13px 14px;
-}
-.choice-icon {
-    width: 31px;
-    height: 31px;
-    display: inline-grid;
-    place-items: center;
-    border-radius: 8px;
-    font-size: 17px;
-    margin-bottom: 6px;
-    background: #eff4ff;
-}
-.choice-title {
-    color: #101828;
-    font-weight: 800;
-    font-size: 12px;
-    line-height: 1.2;
-}
-.choice-en {
-    color: #738096;
-    font-size: 9px;
-    margin-left: 2px;
-}
-.choice-desc {
-    color: #8390a3;
-    font-size: 9px;
-    margin-top: 5px;
-    line-height: 1.35;
-}
-.result-box {
-    margin: 16px 0 0;
-    border-radius: 11px;
-    padding: 11px 13px;
-    border: 1px solid #dbe4ff;
-    background: #f7f8ff;
-    color: #334155;
-    font-size: 11px;
-    line-height: 1.55;
-}
-.result-ok {
-    color: #155eef;
-    font-weight: 900;
-}
-.result-no {
-    color: #d92d20;
-    font-weight: 900;
-}
-
-/* ===== 모듈 콘텐츠 ===== */
-.section-card {
-    background: #ffffff;
-    border: 1px solid #e1e6ee;
-    border-radius: 14px;
-    padding: 21px 22px;
-    box-shadow: 0 8px 22px rgba(16,24,40,.035);
-}
-.section-title {
-    font-size: 18px;
-    font-weight: 850;
-    letter-spacing: -0.05em;
-    color: #101828;
-}
-.section-desc {
-    font-size: 11px;
-    color: #7b8799;
-    line-height: 1.65;
-    margin-top: 5px;
-}
-.mini-card {
-    border: 1px solid #e3e8ef;
-    border-radius: 11px;
-    padding: 13px 14px;
-    background: #fff;
-    height: 100%;
-}
-.mini-card h4 {
-    font-size: 12px;
-    margin: 0 0 6px;
-    color: #1d2939;
-}
-.mini-card p {
-    font-size: 10px;
-    color: #7a8798;
-    line-height: 1.6;
-    margin: 0;
-}
-.log-row {
-    display: flex;
-    justify-content: space-between;
-    padding: 8px 0;
-    border-bottom: 1px solid #eef1f5;
-    font-size: 10px;
-}
-.log-row:last-child { border-bottom: 0; }
-.footer-note {
-    margin-top: 19px;
-    text-align: center;
-    color: #9aa3b2;
-    font-size: 9px;
-}
-
-/* ===== 완료 ===== */
-.finish-card {
-    text-align: center;
-    padding: 34px 20px;
-}
-.finish-icon {
-    font-size: 34px;
-}
-.finish-score {
-    font-size: 32px;
-    font-weight: 900;
-    letter-spacing: -0.06em;
-    color: #5142ea;
-    margin-top: 5px;
-}
-.finish-text {
-    color: #7b8798;
-    font-size: 11px;
-    margin: 5px 0 15px;
-}
-
-/* ===== 반응형 ===== */
-@media (max-width: 760px) {
-    .top-banner {
-        font-size: 9px;
-        gap: 5px;
-    }
-    .brand-title { font-size: 16px; }
-    .question-card { padding: 21px 13px 22px; }
-    .q-title { font-size: 16px; }
-    .section-card { padding: 17px 14px; }
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
+def normalize_text(value: Any) -> str:
+    """시트 셀 값을 안전한 문자열로 정규화합니다."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.endswith(".0") and re.fullmatch(r"\d+\.0", text):
+        return text[:-2]
+    return text
 
 
-# -----------------------------
-# 유틸
-# -----------------------------
-def build_deploy_zip() -> bytes:
-    """현재 app.py + 최소 requirements.txt + README.md를 메모리에서 ZIP으로 생성."""
-    app_path = Path(__file__)
+def normalize_student_id(value: Any) -> str:
+    return normalize_text(value)
+
+
+def now_kst() -> str:
+    return datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def is_blank(value: Any) -> bool:
+    return normalize_text(value) == ""
+
+
+def safe_int(value: Any, default: int = 0) -> int:
     try:
-        source = app_path.read_text(encoding="utf-8")
-    except Exception:
-        source = "# 현재 실행 중인 app.py를 읽지 못했습니다."
-
-    requirements = "streamlit>=1.45,<2.0\n"
-    readme = """# 기술·가정 수업 OT 게임
-
-## Streamlit 배포
-1. GitHub 저장소에 `app.py`와 `requirements.txt`를 업로드합니다.
-2. Streamlit Community Cloud에서 저장소를 연결합니다.
-3. Main file path를 `app.py`로 지정합니다.
-
-이 앱은 외부 이미지·CDN 없이 동작하도록 구성되어 있습니다.
-"""
-
-    mem = io.BytesIO()
-    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("app.py", source)
-        zf.writestr("requirements.txt", requirements)
-        zf.writestr("README.md", readme)
-    mem.seek(0)
-    return mem.getvalue()
+        if is_blank(value):
+            return default
+        return int(float(str(value).strip()))
+    except (ValueError, TypeError):
+        return default
 
 
-def reset_game():
-    st.session_state.question_index = 0
-    st.session_state.score = 0
-    st.session_state.answers = {}
-    st.session_state.selected = None
-    st.session_state.show_result = False
-    st.session_state.complete = False
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
-def answer_question(choice: str):
-    idx = st.session_state.question_index
-    if idx in st.session_state.answers:
+# ============================================================
+# Google Sheets 연결
+# ============================================================
+def _get_gsheets_config() -> Dict[str, Any]:
+    """Streamlit Secrets의 [connections.gsheets] 설정을 일반 dict로 반환합니다."""
+    try:
+        connections = st.secrets.get("connections", {})
+        config = dict(connections.get("gsheets", {})) if connections else {}
+    except Exception as exc:
+        raise RuntimeError("Streamlit Secrets에서 [connections.gsheets]를 읽지 못했습니다.") from exc
+    return config
+
+
+@st.cache_resource(show_spinner=False)
+def get_gspread_client() -> gspread.Client:
+    """Streamlit Secrets의 [connections.gsheets] 서비스 계정 정보로 연결합니다."""
+    config = _get_gsheets_config()
+
+    required = [
+        "project_id",
+        "private_key_id",
+        "private_key",
+        "client_email",
+        "client_id",
+        "auth_uri",
+        "token_uri",
+        "auth_provider_x509_cert_url",
+        "client_x509_cert_url",
+    ]
+    missing = [key for key in required if not config.get(key)]
+    if missing:
+        raise RuntimeError(
+            "Google 서비스 계정 Secrets가 부족합니다. 누락된 항목: " + ", ".join(missing)
+        )
+
+    spreadsheet_ref = config.get("spreadsheet") or config.get("spreadsheet_url") or config.get("spreadsheet_id")
+    if not spreadsheet_ref:
+        raise RuntimeError(
+            "[connections.gsheets]에 spreadsheet(권장), spreadsheet_url 또는 spreadsheet_id 중 하나를 설정하세요."
+        )
+
+    service_account_info = {key: config[key] for key in required}
+    # TOML에 private_key를 "\\n"으로 저장한 경우 실제 개행으로 변환합니다.
+    service_account_info["private_key"] = str(service_account_info["private_key"]).replace("\\n", "\n")
+
+    credentials = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
+    client = gspread.authorize(credentials)
+
+    return client
+
+
+@st.cache_resource(show_spinner=False)
+def get_spreadsheet(spreadsheet_ref: str) -> gspread.Spreadsheet:
+    client = get_gspread_client()
+    ref = str(spreadsheet_ref).strip()
+    if not ref:
+        raise RuntimeError("Google Sheets 참조 정보가 없습니다.")
+
+    try:
+        if ref.startswith("http://") or ref.startswith("https://"):
+            return client.open_by_url(ref)
+        # 10자 이상처럼 보이는 값을 ID로 우선 시도하고, 실패하면 이름으로 엽니다.
+        try:
+            return client.open_by_key(ref)
+        except Exception:
+            return client.open(ref)
+    except Exception as exc:
+        raise RuntimeError(
+            "Google Sheets를 열지 못했습니다. 서비스 계정 이메일에 해당 스프레드시트의 편집 권한이 있는지 확인하세요."
+        ) from exc
+
+
+def get_or_create_worksheet(title: str, headers: List[str]) -> gspread.Worksheet:
+    config = _get_gsheets_config()
+    spreadsheet_ref = config.get("spreadsheet") or config.get("spreadsheet_url") or config.get("spreadsheet_id")
+    if not spreadsheet_ref:
+        raise RuntimeError("[connections.gsheets]에 spreadsheet, spreadsheet_url 또는 spreadsheet_id를 설정하세요.")
+    spreadsheet = get_spreadsheet(str(spreadsheet_ref))
+    try:
+        ws = spreadsheet.worksheet(title)
+    except WorksheetNotFound:
+        ws = spreadsheet.add_worksheet(title=title, rows=max(1000, len(headers) + 10), cols=max(20, len(headers)))
+        ws.update(range_name=f"A1:{_a1_col(len(headers))}1", values=[headers])
+        return ws
+
+    current_headers = ws.row_values(1)
+    if current_headers != headers:
+        # 필수 헤더가 없는 경우 자동 보정합니다. 기존 데이터 열은 임의 삭제하지 않습니다.
+        current_headers = [normalize_text(v) for v in current_headers]
+        missing_headers = [h for h in headers if h not in current_headers]
+        if missing_headers:
+            new_headers = current_headers + missing_headers
+            ws.update(range_name=f"A1:{_a1_col(len(new_headers))}1", values=[new_headers])
+    return ws
+
+
+def _a1_col(n: int) -> str:
+    result = ""
+    x = n
+    while x:
+        x, rem = divmod(x - 1, 26)
+        result = chr(65 + rem) + result
+    return result
+
+
+# ============================================================
+# Sheets 읽기 / 캐시
+# ============================================================
+@st.cache_data(ttl=20, show_spinner=False)
+def read_sheet_records(title: str, headers: Tuple[str, ...]) -> List[Dict[str, str]]:
+    ws = get_or_create_worksheet(title, list(headers))
+    values = ws.get_all_values()
+    if not values:
+        return []
+    actual_headers = [normalize_text(v) for v in values[0]]
+    records: List[Dict[str, str]] = []
+    for row in values[1:]:
+        padded = list(row) + [""] * max(0, len(actual_headers) - len(row))
+        records.append({
+            actual_headers[i]: normalize_text(padded[i]) for i in range(len(actual_headers))
+        })
+    return records
+
+
+def invalidate_data_cache() -> None:
+    read_sheet_records.clear()
+    read_roster.clear()
+    read_week_settings.clear()
+    read_portfolios.clear()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def read_roster() -> pd.DataFrame:
+    records = read_sheet_records("학생명단", tuple(SHEET_CONFIG["학생명단"]))
+    df = pd.DataFrame(records)
+    for col in SHEET_CONFIG["학생명단"]:
+        if col not in df.columns:
+            df[col] = ""
+    if df.empty:
+        return pd.DataFrame(columns=SHEET_CONFIG["학생명단"])
+    for col in df.columns:
+        df[col] = df[col].map(normalize_text)
+    return df[SHEET_CONFIG["학생명단"]].copy()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def read_week_settings() -> pd.DataFrame:
+    records = read_sheet_records("주차설정", tuple(SHEET_CONFIG["주차설정"]))
+    df = pd.DataFrame(records)
+    for col in SHEET_CONFIG["주차설정"]:
+        if col not in df.columns:
+            df[col] = ""
+    if df.empty:
+        return pd.DataFrame(columns=SHEET_CONFIG["주차설정"])
+    df["주차"] = df["주차"].map(lambda x: safe_int(x, 0))
+    return df[SHEET_CONFIG["주차설정"]].copy()
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def read_portfolios() -> pd.DataFrame:
+    records = read_sheet_records("포트폴리오", tuple(SHEET_CONFIG["포트폴리오"]))
+    df = pd.DataFrame(records)
+    for col in SHEET_CONFIG["포트폴리오"]:
+        if col not in df.columns:
+            df[col] = ""
+    if df.empty:
+        return pd.DataFrame(columns=SHEET_CONFIG["포트폴리오"])
+
+    for col in ["제출ID", "학번", "제출내용", "피드백", "제출일시", "수정일시", "상태"]:
+        df[col] = df[col].map(normalize_text)
+    df["주차"] = df["주차"].map(lambda x: safe_int(x, 0))
+    df["점수"] = pd.to_numeric(df["점수"], errors="coerce")
+    return df[SHEET_CONFIG["포트폴리오"]].copy()
+
+
+# ============================================================
+# 주차/Portfolio 조회
+# ============================================================
+def week_info(week: int) -> Tuple[str, str]:
+    df = read_week_settings()
+    if not df.empty:
+        found = df[df["주차"] == week]
+        if not found.empty:
+            row = found.iloc[0]
+            goal = normalize_text(row.get("학습목표", ""))
+            question = normalize_text(row.get("활동지질문", ""))
+            return (
+                goal or f"{week}주차의 핵심 개념과 학습 내용을 정리합니다.",
+                question or "이번 주 학습에서 이해한 핵심 내용, 수행 과정, 결과를 구체적으로 기록해 보세요.",
+            )
+    return (
+        f"{week}주차의 핵심 개념과 학습 내용을 정리합니다.",
+        "이번 주 학습에서 이해한 핵심 내용, 수행 과정, 결과를 구체적으로 기록해 보세요.",
+    )
+
+
+def latest_student_portfolio(portfolios: pd.DataFrame, student_id: str) -> pd.DataFrame:
+    """같은 학생·주차의 중복 행이 있다면 가장 마지막 행을 사용합니다."""
+    if portfolios.empty:
+        return portfolios.copy()
+    df = portfolios[portfolios["학번"].map(normalize_student_id) == normalize_student_id(student_id)].copy()
+    if df.empty:
+        return df
+    df["_order"] = range(len(df))
+    df = df.sort_values("_order").drop_duplicates(subset=["학번", "주차"], keep="last")
+    return df.drop(columns=["_order"])
+
+
+def get_portfolio_sheet() -> gspread.Worksheet:
+    return get_or_create_worksheet("포트폴리오", SHEET_CONFIG["포트폴리오"])
+
+
+def _find_portfolio_row(ws: gspread.Worksheet, student_id: str, week: int) -> Optional[int]:
+    values = ws.get_all_values()
+    if len(values) <= 1:
+        return None
+    headers = [normalize_text(v) for v in values[0]]
+    try:
+        id_col = headers.index("학번")
+        week_col = headers.index("주차")
+    except ValueError:
+        raise RuntimeError("포트폴리오 시트의 헤더가 올바르지 않습니다.")
+
+    found: Optional[int] = None
+    for idx, row in enumerate(values[1:], start=2):
+        padded = row + [""] * max(0, len(headers) - len(row))
+        if normalize_student_id(padded[id_col]) == normalize_student_id(student_id) and safe_int(padded[week_col], -1) == week:
+            found = idx
+    return found
+
+
+def _header_map(ws: gspread.Worksheet) -> Dict[str, int]:
+    return {h: i + 1 for i, h in enumerate([normalize_text(v) for v in ws.row_values(1)])}
+
+
+def save_student_submission(student_id: str, week: int, content: str) -> None:
+    content = content.strip()
+    if not content:
+        raise ValueError("제출 내용이 비어 있습니다. 답안을 작성해 주세요.")
+
+    ws = get_portfolio_sheet()
+    header = _header_map(ws)
+    row_num = _find_portfolio_row(ws, student_id, week)
+    timestamp = now_kst()
+
+    if row_num is None:
+        values = [
+            uuid.uuid4().hex[:12],
+            normalize_student_id(student_id),
+            str(week),
+            content,
+            "",
+            "",
+            timestamp,
+            "",
+            "제출완료",
+        ]
+        ws.append_row(values, value_input_option="RAW")
+    else:
+        # 학생 제출은 필요한 셀만 한 번의 batch_update로 갱신하여
+        # 교사가 입력한 점수·피드백을 덮어쓰지 않으며 API 호출 수도 줄입니다.
+        ws.batch_update([
+            {"range": f"{_a1_col(header['제출내용'])}{row_num}", "values": [[content]]},
+            {"range": f"{_a1_col(header['제출일시'])}{row_num}", "values": [[timestamp]]},
+            {"range": f"{_a1_col(header['수정일시'])}{row_num}", "values": [[timestamp]]},
+            {"range": f"{_a1_col(header['상태'])}{row_num}", "values": [["제출완료"]]},
+        ], raw=True)
+
+    invalidate_data_cache()
+
+
+def save_teacher_grade(student_id: str, week: int, score: Optional[float], feedback: str) -> None:
+    if score is not None and (score < 0 or score > 100):
+        raise ValueError("점수는 0~100 사이로 입력하세요.")
+
+    ws = get_portfolio_sheet()
+    header = _header_map(ws)
+    row_num = _find_portfolio_row(ws, student_id, week)
+    if row_num is None:
+        raise ValueError("아직 제출된 포트폴리오가 없어 점수를 저장할 수 없습니다.")
+
+    score_value = "" if score is None else str(round(float(score), 1))
+    # 점수·피드백을 하나의 요청으로 저장합니다.
+    ws.batch_update([
+        {"range": f"{_a1_col(header['점수'])}{row_num}", "values": [[score_value]]},
+        {"range": f"{_a1_col(header['피드백'])}{row_num}", "values": [[feedback.strip()]]},
+    ], raw=True)
+    invalidate_data_cache()
+
+
+# ============================================================
+# 인증 / 세션 상태
+# ============================================================
+def init_state() -> None:
+    defaults = {
+        "role": None,
+        "student_id": None,
+        "student_name": None,
+        "selected_week": 1,
+        "admin_tab": "대시보드",
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def reset_session() -> None:
+    for key in ["role", "student_id", "student_name", "selected_week", "admin_tab"]:
+        st.session_state.pop(key, None)
+    st.cache_resource.clear()
+    st.cache_data.clear()
+    st.rerun()
+
+
+def get_teacher_password_config() -> Tuple[Optional[str], Optional[str]]:
+    password = st.secrets.get("TEACHER_PASSWORD")
+    password_hash = st.secrets.get("TEACHER_PASSWORD_HASH")
+    return (
+        normalize_text(password) or None,
+        normalize_text(password_hash) or None,
+    )
+
+
+def verify_teacher_password(password: str) -> bool:
+    plain, password_hash = get_teacher_password_config()
+    if password_hash:
+        return hashlib.sha256(password.encode("utf-8")).hexdigest() == password_hash
+    if plain:
+        return password == plain
+    return False
+
+
+def student_login(student_id_input: str) -> bool:
+    student_id = normalize_student_id(student_id_input)
+    roster = read_roster()
+    if roster.empty:
+        return False
+    matched = roster[roster["학번"].map(normalize_student_id) == student_id]
+    if matched.empty:
+        return False
+    row = matched.iloc[0]
+    st.session_state["role"] = "student"
+    st.session_state["student_id"] = student_id
+    st.session_state["student_name"] = normalize_text(row["이름"])
+    st.session_state["selected_week"] = 1
+    return True
+
+
+def render_login() -> None:
+    st.markdown(
+        """
+        <div class='hero'>
+          <div class='eyebrow'>TECH · HOME ECONOMICS</div>
+          <h1>한 학기 포트폴리오</h1>
+          <p>1주차부터 17주차까지의 학습 과정과 성장을 기록합니다.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    tab_student, tab_teacher = st.tabs(["학생 로그인", "교사 로그인"])
+    with tab_student:
+        with st.form("student_login_form", clear_on_submit=False):
+            student_id = st.text_input(
+                "학번",
+                placeholder="예: 10101",
+                max_chars=20,
+                key="student_login_input",
+            )
+            submitted = st.form_submit_button("학생으로 들어가기", type="primary", use_container_width=True)
+        if submitted:
+            if student_login(student_id):
+                st.success(f"{st.session_state['student_name']} 학생으로 로그인했습니다.")
+                st.rerun()
+            else:
+                st.error("학생명단에서 학번을 찾지 못했습니다. 학번을 다시 확인하세요.")
+        st.caption("학생 로그인은 학생명단 시트에 등록된 학번만 사용할 수 있습니다.")
+
+    with tab_teacher:
+        with st.form("teacher_login_form", clear_on_submit=False):
+            password = st.text_input("관리자 비밀번호", type="password", key="teacher_password_input")
+            submitted = st.form_submit_button("교사 모드로 들어가기", type="primary", use_container_width=True)
+        if submitted:
+            if verify_teacher_password(password):
+                st.session_state["role"] = "teacher"
+                st.rerun()
+            if get_teacher_password_config() == (None, None):
+                st.error("관리자 비밀번호가 Secrets에 설정되어 있지 않습니다.")
+            else:
+                st.error("관리자 비밀번호가 올바르지 않습니다.")
+
+
+# ============================================================
+# 스타일
+# ============================================================
+def inject_css() -> None:
+    st.markdown(
+        """
+        <style>
+        :root { color-scheme: light; }
+        .stApp { background: #f5f5f7; }
+        .block-container { max-width: 1420px; padding-top: 2.4rem; padding-bottom: 4rem; }
+        .hero { padding: 1.2rem 0 1.4rem; }
+        .eyebrow { font-size: .74rem; font-weight: 700; letter-spacing: .12em; color: #6e6e73; }
+        .hero h1 { margin: .2rem 0 .3rem; font-size: 2.3rem; letter-spacing: -.04em; color: #1d1d1f; }
+        .hero p { margin: 0; color: #6e6e73; font-size: 1rem; }
+        .section-title { font-size: 1.35rem; font-weight: 750; color: #1d1d1f; margin: .3rem 0 .4rem; }
+        .muted { color: #6e6e73; }
+        .card { background: white; border: 1px solid rgba(0,0,0,.06); border-radius: 20px; padding: 1.1rem 1.15rem; box-shadow: 0 8px 30px rgba(0,0,0,.035); }
+        .metric { background: white; border: 1px solid rgba(0,0,0,.06); border-radius: 18px; padding: .9rem 1rem; }
+        .metric-label { color:#6e6e73; font-size:.78rem; }
+        .metric-value { color:#1d1d1f; font-size:1.45rem; font-weight:750; margin-top:.15rem; }
+        .week-badge { display:inline-block; padding:.28rem .55rem; border-radius:999px; background:#f2f2f7; color:#1d1d1f; font-size:.76rem; font-weight:700; }
+        div[data-testid="stDataFrame"] { border-radius: 14px; overflow:hidden; }
+        button[kind="primary"] { border-radius: 12px; }
+        .stButton > button { border-radius: 12px; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================
+# 공통 UI
+# ============================================================
+def render_topbar(name: str, role_label: str) -> None:
+    c1, c2 = st.columns([6, 1], vertical_alignment="center")
+    with c1:
+        st.markdown(f"<div class='muted'>{role_label}</div><div style='font-size:1.4rem;font-weight:750;color:#1d1d1f'>{name}</div>", unsafe_allow_html=True)
+    with c2:
+        if st.button("로그아웃", use_container_width=True):
+            reset_session()
+
+
+def metric_card(label: str, value: str) -> None:
+    st.markdown(
+        f"<div class='metric'><div class='metric-label'>{label}</div><div class='metric-value'>{value}</div></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def student_portfolio_summary(student_id: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    portfolios = latest_student_portfolio(read_portfolios(), student_id)
+    rows = []
+    for week in WEEKS:
+        found = portfolios[portfolios["주차"] == week]
+        if found.empty:
+            rows.append({"주차": f"{week}주차", "제출": "미제출", "점수": "-", "피드백": ""})
+        else:
+            row = found.iloc[0]
+            score = row["점수"]
+            score_text = "-" if pd.isna(score) else f"{float(score):g}"
+            rows.append({
+                "주차": f"{week}주차",
+                "제출": "제출완료" if normalize_text(row["상태"]) or row["제출내용"] else "미제출",
+                "점수": score_text,
+                "피드백": normalize_text(row["피드백"]),
+            })
+    summary = pd.DataFrame(rows)
+
+    scored = pd.to_numeric(portfolios["점수"], errors="coerce") if not portfolios.empty else pd.Series(dtype=float)
+    return summary, pd.DataFrame({"점수": scored})
+
+
+# ============================================================
+# 학생 모드
+# ============================================================
+def render_student() -> None:
+    student_id = st.session_state["student_id"]
+    student_name = st.session_state["student_name"]
+    roster = read_roster()
+    portfolios_all = read_portfolios()
+    portfolios = latest_student_portfolio(portfolios_all, student_id)
+
+    render_topbar(f"{student_name} · {student_id}", "학생 포트폴리오")
+
+    submitted_count = len(portfolios[portfolios["제출내용"].map(lambda x: not is_blank(x))]) if not portfolios.empty else 0
+    score_series = pd.to_numeric(portfolios["점수"], errors="coerce") if not portfolios.empty else pd.Series(dtype=float)
+    total_score = float(score_series.fillna(0).sum()) if not score_series.empty else 0.0
+    scored_count = int(score_series.notna().sum()) if not score_series.empty else 0
+
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        metric_card("제출 현황", f"{submitted_count} / 17주")
+    with m2:
+        metric_card("누적 점수", f"{total_score:g}점")
+    with m3:
+        metric_card("채점 완료", f"{scored_count}주")
+
+    st.write("")
+    portfolio_tab, mypage_tab = st.tabs(["주차별 포트폴리오", "나의 성적 · 요약"])
+
+    with portfolio_tab:
+        left, right = st.columns([2, 5], vertical_alignment="bottom")
+        with left:
+            default_week = int(st.session_state.get("selected_week", 1))
+            selected_week = st.selectbox(
+                "주차 선택",
+                WEEKS,
+                index=WEEKS.index(default_week) if default_week in WEEKS else 0,
+                format_func=lambda x: f"{x}주차",
+                key="student_week_selector",
+            )
+            st.session_state["selected_week"] = selected_week
+        with right:
+            goal, question = week_info(selected_week)
+            st.markdown(f"<span class='week-badge'>{selected_week}주차</span>", unsafe_allow_html=True)
+            st.markdown(f"**학습 목표**  {goal}")
+
+        st.markdown(f"### 활동지 질문\n{question}")
+
+        existing = portfolios[portfolios["주차"] == selected_week]
+        existing_content = existing.iloc[0]["제출내용"] if not existing.empty else ""
+        existing_feedback = existing.iloc[0]["피드백"] if not existing.empty else ""
+        existing_score = existing.iloc[0]["점수"] if not existing.empty else float("nan")
+        existing_timestamp = existing.iloc[0]["수정일시"] or existing.iloc[0]["제출일시"] if not existing.empty else ""
+
+        with st.form(f"portfolio_form_{selected_week}"):
+            content = st.text_area(
+                "학생 답안",
+                value=existing_content,
+                height=280,
+                placeholder="학습 과정, 생각, 수행 결과를 구체적으로 기록해 보세요.",
+                key=f"content_{selected_week}",
+            )
+            submitted = st.form_submit_button("제출 / 수정 저장", type="primary", use_container_width=True)
+
+        if submitted:
+            try:
+                save_student_submission(student_id, selected_week, content)
+                st.success(f"{selected_week}주차 포트폴리오가 저장되었습니다.")
+                st.rerun()
+            except (ValueError, APIError, RuntimeError) as exc:
+                st.error(str(exc))
+
+        info1, info2, info3 = st.columns(3)
+        with info1:
+            status = "제출완료" if not is_blank(existing_content) else "미제출"
+            metric_card("상태", status)
+        with info2:
+            score_text = "-" if pd.isna(existing_score) else f"{float(existing_score):g}점"
+            metric_card("점수", score_text)
+        with info3:
+            metric_card("최근 저장", existing_timestamp or "-" )
+
+        if existing_feedback:
+            st.markdown("#### 교사 피드백")
+            st.info(existing_feedback)
+
+    with mypage_tab:
+        st.markdown("### 1~17주차 제출 현황")
+        summary, _ = student_portfolio_summary(student_id)
+        st.dataframe(summary, hide_index=True, use_container_width=True)
+
+        completed = summary[summary["제출"] == "제출완료"]
+        completion_rate = (len(completed) / 17) * 100
+        score_values = pd.to_numeric(summary["점수"].replace("-", pd.NA), errors="coerce")
+        avg_score = float(score_values.mean()) if score_values.notna().any() else 0.0
+        total = float(score_values.fillna(0).sum()) if len(score_values) else 0.0
+
+        a, b, c = st.columns(3)
+        with a:
+            metric_card("제출률", f"{completion_rate:.0f}%")
+        with b:
+            metric_card("평균 점수", f"{avg_score:.1f}점")
+        with c:
+            metric_card("총점", f"{total:g}점")
+
+        st.markdown("### 주차별 점수")
+        chart_df = pd.DataFrame({
+            "주차": WEEKS,
+            "점수": score_values.tolist(),
+        }).fillna(0)
+        fig = px.bar(chart_df, x="주차", y="점수", text_auto=True, labels={"주차": "주차", "점수": "점수"})
+        fig.update_layout(height=330, margin=dict(l=10, r=10, t=30, b=10), xaxis=dict(dtick=1))
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("### 교사 피드백")
+        feedback_rows = summary[summary["피드백"].astype(str).str.strip() != ""][["주차", "피드백"]]
+        if feedback_rows.empty:
+            st.caption("아직 등록된 피드백이 없습니다.")
+        else:
+            st.dataframe(feedback_rows, hide_index=True, use_container_width=True)
+
+
+# ============================================================
+# 교사 대시보드
+# ============================================================
+def latest_all_portfolios() -> pd.DataFrame:
+    df = read_portfolios().copy()
+    if df.empty:
+        return df
+    df["_order"] = range(len(df))
+    df = df.sort_values("_order").drop_duplicates(subset=["학번", "주차"], keep="last")
+    return df.drop(columns=["_order"])
+
+
+def build_overall_table(roster: pd.DataFrame, portfolios: pd.DataFrame) -> pd.DataFrame:
+    base = roster.copy()
+    if base.empty:
+        return pd.DataFrame()
+    if portfolios.empty:
+        portfolios = pd.DataFrame(columns=SHEET_CONFIG["포트폴리오"])
+    else:
+        portfolios = portfolios.copy()
+        portfolios["학번"] = portfolios["학번"].map(normalize_student_id)
+
+    p = portfolios[["학번", "주차", "점수"]].copy()
+    p["점수"] = pd.to_numeric(p["점수"], errors="coerce")
+    pivot = p.pivot(index="학번", columns="주차", values="점수") if not p.empty else pd.DataFrame()
+    pivot = pivot.reindex(columns=WEEKS, fill_value=pd.NA)
+    pivot.columns = [f"{w}주차" for w in WEEKS]
+    if not pivot.empty:
+        pivot["총점"] = pivot.sum(axis=1, skipna=True)
+        pivot["채점주"] = pivot[[f"{w}주차" for w in WEEKS]].notna().sum(axis=1)
+    else:
+        pivot = pd.DataFrame(index=pd.Index([], name="학번"))
+        for w in WEEKS:
+            pivot[f"{w}주차"] = pd.NA
+        pivot["총점"] = 0
+        pivot["채점주"] = 0
+
+    result = base.merge(pivot.reset_index(), on="학번", how="left")
+    week_cols = [f"{w}주차" for w in WEEKS]
+    result["총점"] = result["총점"].fillna(0)
+    result["채점주"] = result["채점주"].fillna(0).astype(int)
+    result["제출주"] = 0
+    if not portfolios.empty:
+        submitted = portfolios[portfolios["제출내용"].map(lambda x: not is_blank(x))].drop_duplicates(["학번", "주차"])
+        count_map = submitted.groupby("학번")["주차"].nunique()
+        result["제출주"] = result["학번"].map(count_map).fillna(0).astype(int)
+    result["제출률"] = result["제출주"] / len(WEEKS) * 100
+    return result[["학번", "이름", "학년", "반", "번호", "제출주", "제출률", "채점주", "총점"] + week_cols]
+
+
+def build_class_stats(roster: pd.DataFrame, portfolios: pd.DataFrame) -> pd.DataFrame:
+    overall = build_overall_table(roster, portfolios)
+    if overall.empty:
+        return pd.DataFrame()
+    stats = overall.groupby(["학년", "반"], dropna=False).agg(
+        학생수=("학번", "nunique"),
+        제출률=("제출률", "mean"),
+        평균총점=("총점", "mean"),
+    ).reset_index()
+    stats["학급"] = stats["학년"].astype(str) + "학년 " + stats["반"].astype(str) + "반"
+    return stats[["학급", "학생수", "제출률", "평균총점"]].sort_values("학급")
+
+
+def render_teacher_dashboard(roster: pd.DataFrame, portfolios: pd.DataFrame) -> None:
+    st.markdown("### 종합 현황")
+    overall = build_overall_table(roster, portfolios)
+    class_stats = build_class_stats(roster, portfolios)
+
+    submitted = int((overall["제출주"].sum()) if not overall.empty else 0)
+    expected = len(overall) * len(WEEKS)
+    submission_rate = submitted / expected * 100 if expected else 0
+    avg_total = float(overall["총점"].mean()) if not overall.empty else 0.0
+    scored_records = int((pd.to_numeric(portfolios["점수"], errors="coerce").notna()).sum()) if not portfolios.empty else 0
+
+    a, b, c, d = st.columns(4)
+    with a:
+        metric_card("등록 학생", f"{len(overall):,}명")
+    with b:
+        metric_card("전체 제출률", f"{submission_rate:.1f}%")
+    with c:
+        metric_card("학생 평균 총점", f"{avg_total:.1f}점")
+    with d:
+        metric_card("채점 데이터", f"{scored_records:,}건")
+
+    st.write("")
+    st.markdown("#### 학급별 제출률")
+    if class_stats.empty:
+        st.info("학생명단에 학생을 등록하면 통계가 표시됩니다.")
+    else:
+        fig = px.bar(
+            class_stats,
+            x="학급",
+            y="제출률",
+            text=class_stats["제출률"].round(1).astype(str) + "%",
+            labels={"학급": "학급", "제출률": "제출률(%)"},
+        )
+        fig.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=20), yaxis=dict(range=[0, 100]))
+        st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(class_stats.round({"제출률": 1, "평균총점": 1}), hide_index=True, use_container_width=True)
+
+    st.markdown("#### 학년별 비교")
+    if not overall.empty:
+        grade_stats = overall.groupby("학년", dropna=False).agg(
+            학생수=("학번", "nunique"),
+            제출률=("제출률", "mean"),
+            평균총점=("총점", "mean"),
+        ).reset_index()
+        st.dataframe(grade_stats.round({"제출률": 1, "평균총점": 1}), hide_index=True, use_container_width=True)
+
+
+def render_teacher_grade(roster: pd.DataFrame, portfolios: pd.DataFrame) -> None:
+    st.markdown("### 개별 학생 채점 · 피드백")
+    if roster.empty:
+        st.warning("학생명단 시트에 학생이 없습니다.")
         return
 
-    correct = QUESTIONS[idx]["answer"]
-    st.session_state.answers[idx] = choice
-    st.session_state.selected = choice
-    st.session_state.show_result = True
+    grade_values = sorted([x for x in roster["학년"].unique() if x != ""], key=lambda x: safe_int(x, 999))
+    grade = st.selectbox("학년", grade_values, key="grade_selector")
+    class_values = sorted([x for x in roster.loc[roster["학년"] == grade, "반"].unique() if x != ""], key=lambda x: safe_int(x, 999))
+    class_no = st.selectbox("반", class_values, key="class_selector")
 
-    if choice == correct:
-        st.session_state.score += 10
-
-
-def next_question():
-    idx = st.session_state.question_index
-    if idx < len(QUESTIONS) - 1:
-        st.session_state.question_index += 1
-        st.session_state.selected = None
-        st.session_state.show_result = False
-    else:
-        st.session_state.complete = True
-
-
-# -----------------------------
-# 상단
-# -----------------------------
-st.markdown(
-    """
-<div class="top-banner">
-    <span class="tag">ZIP 준비완료</span>
-    <span>GitHub 업로드용 Streamlit 배포 패키지 (app.py + requirements.txt + README.md)</span>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-brand_cols = st.columns([0.82, 0.18], vertical_alignment="center")
-with brand_cols[0]:
-    st.markdown(
-        """
-<div class="brand-row">
-  <div class="brand-left">
-    <div class="brand-logo">기·가</div>
-    <div>
-      <div class="brand-title">
-        기술·가정 수업 OT 게임
-        <span class="badge">2026 오리엔테이션</span>
-      </div>
-      <div class="brand-sub">아이스브레이킹 게임 · GitHub 업로드용 Streamlit(app.py) 코드</div>
-    </div>
-  </div>
-</div>
-""",
-        unsafe_allow_html=True,
+    students = roster[(roster["학년"] == grade) & (roster["반"] == class_no)].copy()
+    students = students.sort_values(by="번호", key=lambda s: s.map(lambda x: safe_int(x, 999)))
+    student_options = students["학번"].tolist()
+    student_id = st.selectbox(
+        "학생",
+        student_options,
+        format_func=lambda sid: f"{sid} · {students.loc[students['학번'] == sid, '이름'].iloc[0]}",
+        key="teacher_student_selector",
     )
-with brand_cols[1]:
-    st.download_button(
-        "⬇ ZIP 다운로드",
-        data=build_deploy_zip(),
-        file_name="tech_home_ot_streamlit.zip",
-        mime="application/zip",
-        use_container_width=True,
-        key="download_zip_top",
-    )
+    week = st.selectbox("주차", WEEKS, format_func=lambda x: f"{x}주차", key="teacher_week_selector")
 
-# -----------------------------
-# 상단 메뉴
-# -----------------------------
-st.markdown('<div class="nav-strip">', unsafe_allow_html=True)
-nav_cols = st.columns(5, gap="small")
-for i, (label, icon) in enumerate(MODULES):
-    with nav_cols[i]:
-        prefix = f"{icon} " if i == st.session_state.module else ""
-        if st.button(
-            prefix + label,
-            key=f"module_{i}",
-            use_container_width=True,
-        ):
-            st.session_state.module = i
+    student_row = students[students["학번"] == student_id].iloc[0]
+    st.markdown(f"#### {student_row['이름']} · {student_id} · {week}주차")
+
+    current = latest_student_portfolio(portfolios, student_id)
+    current = current[current["주차"] == week]
+    if current.empty or is_blank(current.iloc[0]["제출내용"]):
+        st.info("해당 주차에 학생이 아직 제출한 포트폴리오가 없습니다.")
+        return
+
+    row = current.iloc[0]
+    st.markdown("##### 학생 제출 내용")
+    st.markdown(f"<div class='card'>{normalize_text(row['제출내용']).replace(chr(10), '<br>')}</div>", unsafe_allow_html=True)
+    st.caption(f"제출일시: {row['제출일시'] or '-'}")
+
+    has_score = not pd.isna(row["점수"])
+    current_score = 0.0 if not has_score else float(row["점수"])
+    current_feedback = normalize_text(row["피드백"])
+    with st.form("teacher_grade_form"):
+        grade_enabled = st.checkbox("채점 완료", value=has_score, key="grade_enabled")
+        score = st.number_input("점수 (0~100)", min_value=0.0, max_value=100.0, value=float(current_score), step=1.0)
+        feedback = st.text_input("피드백(한 줄 평)", value=current_feedback, max_chars=300)
+        save = st.form_submit_button("점수 · 피드백 저장", type="primary", use_container_width=True)
+
+    if save:
+        try:
+            save_teacher_grade(student_id, week, score if grade_enabled else None, feedback)
+            st.success("점수와 피드백이 저장되었습니다.")
             st.rerun()
-st.markdown("</div>", unsafe_allow_html=True)
+        except (ValueError, APIError, RuntimeError) as exc:
+            st.error(str(exc))
 
 
-# -----------------------------
-# 모듈 1 : 핵심 게임
-# -----------------------------
-if st.session_state.module == 0:
-    if st.session_state.complete:
-        st.markdown(
-            f"""
-<div class="question-card finish-card">
-  <div class="finish-icon">🎉</div>
-  <div class="section-title">분류 게임 완료!</div>
-  <div class="finish-score">{st.session_state.score}점</div>
-  <div class="finish-text">
-      10개의 상황을 기술·가정·융합으로 분류했습니다.
-  </div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
+def render_teacher_download(roster: pd.DataFrame, portfolios: pd.DataFrame) -> None:
+    st.markdown("### 전체 성적표 다운로드")
+    overall = build_overall_table(roster, portfolios)
+    if overall.empty:
+        st.info("다운로드할 학생 데이터가 없습니다.")
+        return
 
-        c1, c2, c3 = st.columns([1, 1, 1])
-        with c2:
-            if st.button("↻ 처음부터 다시 하기", use_container_width=True):
-                reset_game()
-                st.rerun()
-    else:
-        q_idx = st.session_state.question_index
-        q = QUESTIONS[q_idx]
-        total = len(QUESTIONS)
-        progress = int(((q_idx + 1) / total) * 100)
-
-        st.markdown(
-            f"""
-<div class="progress-shell">
-  <div class="progress-top">
-    <span class="progress-pill">진행도: {q_idx + 1}/{total}</span>
-    <span class="score-label">현재 점수: <span class="score-number">{st.session_state.score}점</span></span>
-  </div>
-  <div class="progress-track">
-    <div class="progress-fill" style="width:{progress}%"></div>
-  </div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-
-        st.markdown(
-            f"""
-<div class="question-card">
-  <div class="q-meta">문제 #{q_idx + 1} · 일상 속 분야 맞히기</div>
-  <div class="q-title">{q["q"]}</div>
-  <div class="q-hint">{q["hint"]}</div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-
-        # 실제 클릭 가능한 선택 영역
-        choice_cols = st.columns(3, gap="small")
-        for col, (label, icon, en, desc) in zip(choice_cols, CHOICES):
-            with col:
-                st.markdown(
-                    f"""
-<div class="choice-card">
-  <div class="choice-icon">{icon}</div>
-  <div class="choice-title">{label} <span class="choice-en">({en})</span></div>
-  <div class="choice-desc">{desc}</div>
-</div>
-""",
-                    unsafe_allow_html=True,
-                )
-                already = q_idx in st.session_state.answers
-                button_label = "선택됨" if already and st.session_state.answers[q_idx] == label else "선택"
-                if st.button(
-                    button_label,
-                    key=f"choice_{q_idx}_{label}",
-                    use_container_width=True,
-                    disabled=already,
-                ):
-                    answer_question(label)
-                    st.rerun()
-
-        if st.session_state.show_result:
-            selected = st.session_state.selected
-            correct = q["answer"]
-            is_correct = selected == correct
-
-            st.markdown(
-                f"""
-<div class="result-box">
-  <span class="{'result-ok' if is_correct else 'result-no'}">
-      {"정답입니다! +10점" if is_correct else f"아쉬워요 · 정답은 {correct}"}
-  </span>
-  &nbsp; {q["explain"]}
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-
-            st.write("")
-            nav_c1, nav_c2, nav_c3 = st.columns([1, 1, 1])
-            with nav_c2:
-                next_label = "마지막 결과 보기" if q_idx == total - 1 else "다음 문제 →"
-                if st.button(next_label, use_container_width=True, type="primary"):
-                    next_question()
-                    st.rerun()
-
-        st.markdown(
-            '<div class="footer-note">선택 → 결과 확인 → 다음 문제 · 모든 점수는 현재 브라우저 세션에서만 유지됩니다.</div>',
-            unsafe_allow_html=True,
-        )
-
-
-# -----------------------------
-# 모듈 2
-# -----------------------------
-elif st.session_state.module == 1:
-    st.markdown(
-        """
-<div class="section-card">
-  <div class="section-title">📖 2. 기-가 듀얼빌</div>
-  <div class="section-desc">
-    기술적 문제 해결과 생활 속 의사결정을 하나의 프로젝트로 연결해 보는 미니 활동입니다.
-  </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-    st.write("")
-    a, b = st.columns(2, gap="small")
-    with a:
-        st.markdown(
-            """
-<div class="mini-card">
-  <h4>🛠️ 기술 미션</h4>
-  <p>교실 또는 집에서 불편한 문제 하나를 발견하고, 센서·제품·공간·정보를 활용한 해결 아이디어를 한 문장으로 만들어 보세요.</p>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-    with b:
-        st.markdown(
-            """
-<div class="mini-card">
-  <h4>🍲 가정 미션</h4>
-  <p>같은 문제를 가족의 생활 습관, 시간, 비용, 안전, 관계의 관점에서 다시 정의해 보세요.</p>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-    st.write("")
-    idea = st.text_area(
-        "나의 융합 아이디어",
-        placeholder="예) 전력 사용량을 보여 주는 가족용 대시보드를 만들고, 주간 절약 규칙을 함께 정한다.",
-        height=110,
-        key="dual_build_text",
-    )
-    if st.button("💡 아이디어 저장", type="primary", use_container_width=True):
-        if idea.strip():
-            st.success("아이디어를 현재 세션에 저장했습니다.")
-        else:
-            st.warning("한 문장 정도의 아이디어를 입력해 주세요.")
-
-
-# -----------------------------
-# 모듈 3
-# -----------------------------
-elif st.session_state.module == 2:
-    st.markdown(
-        """
-<div class="section-card">
-  <div class="section-title">⚖️ 3. 생존 밸런스 로그</div>
-  <div class="section-desc">
-    생활 문제를 해결할 때 기술의 편리함만 보지 않고 비용·시간·안전·환경까지 함께 점검합니다.
-  </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-    st.write("")
-    log_data = [
-        ("편리성", "기술이 시간을 줄여 주는가?", "높음"),
-        ("비용", "도입·유지 비용을 감당할 수 있는가?", "보통"),
-        ("안전", "오작동 또는 잘못된 사용에 대한 대비가 있는가?", "필수"),
-        ("지속가능성", "에너지와 자원을 적절하게 사용하는가?", "확인"),
-    ]
-    for title, question, tag in log_data:
-        st.markdown(
-            f"""
-<div class="log-row">
-  <span><b>{title}</b> · {question}</span>
-  <span style="color:#5142ea;font-weight:800">{tag}</span>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-
-
-# -----------------------------
-# 모듈 4
-# -----------------------------
-elif st.session_state.module == 3:
-    st.markdown(
-        """
-<div class="section-card">
-  <div class="section-title">📋 4. 안전 수칙 & 리더십</div>
-  <div class="section-desc">
-    실습과 프로젝트에서는 '잘 만드는 것'뿐 아니라 안전하게 협업하고 책임 있게 사용하는 과정이 중요합니다.
-  </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-    st.write("")
-    rules = [
-        ("01", "공구·전기·가열 기구를 사용하기 전 사용법과 위험요소를 먼저 확인합니다."),
-        ("02", "역할을 나누되, 위험 작업은 담당자와 확인자를 함께 정합니다."),
-        ("03", "실패한 결과도 기록하고 다음 설계에 반영합니다."),
-        ("04", "다른 사람의 생활 문제를 해결할 때 개인정보와 안전을 우선합니다."),
-    ]
-    for num, text_ in rules:
-        left, right = st.columns([0.12, 0.88], gap="small")
-        with left:
-            st.markdown(
-                f"<div style='font-weight:900;color:#5142ea;font-size:15px;padding-top:7px'>{num}</div>",
-                unsafe_allow_html=True,
-            )
-        with right:
-            st.markdown(
-                f"""
-<div class="mini-card" style="padding:10px 13px;margin-bottom:7px">
-  <p style="font-size:10px;color:#344054">{text_}</p>
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-
-
-# -----------------------------
-# 모듈 5
-# -----------------------------
-else:
-    st.markdown(
-        """
-<div class="section-card">
-  <div class="section-title">🛒 5. Streamlit GitHub 코드 & ZIP</div>
-  <div class="section-desc">
-    이 페이지의 게임은 외부 이미지나 CDN 없이 단일 <b>app.py</b>로 동작하도록 구성했습니다.
-    GitHub에 올린 뒤 Streamlit Community Cloud에서 바로 실행할 수 있습니다.
-  </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-    st.write("")
-
-    st.markdown(
-        """
-<div class="mini-card">
-  <h4>배포 구조</h4>
-  <p>
-  GitHub 저장소<br>
-  ├─ <b>app.py</b> · 게임 본체<br>
-  ├─ <b>requirements.txt</b> · Streamlit 의존성<br>
-  └─ <b>README.md</b> · 배포 안내
-  </p>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-    st.write("")
+    csv_bytes = overall.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
     st.download_button(
-        "⬇ Streamlit 배포 ZIP 만들기",
-        data=build_deploy_zip(),
-        file_name="tech_home_ot_streamlit.zip",
-        mime="application/zip",
+        "전체 학생 주차별 점수표 CSV 다운로드",
+        data=csv_bytes,
+        file_name=f"기술가정_포트폴리오_성적표_{datetime.now(KST).strftime('%Y%m%d')}.csv",
+        mime="text/csv",
         use_container_width=True,
-        key="download_zip_bottom",
     )
+    st.dataframe(overall, hide_index=True, use_container_width=True, height=560)
 
-    st.info(
-        "Streamlit Cloud에서는 GitHub 저장소를 연결한 뒤 Main file path를 app.py로 지정하면 됩니다."
+
+def render_teacher() -> None:
+    roster = read_roster()
+    portfolios = latest_all_portfolios()
+    render_topbar("교사 관리자", "기술·가정 포트폴리오 · 관리자 모드")
+
+    tab_dashboard, tab_grade, tab_download = st.tabs(["종합 대시보드", "학생 채점", "성적표 다운로드"])
+    with tab_dashboard:
+        render_teacher_dashboard(roster, portfolios)
+    with tab_grade:
+        render_teacher_grade(roster, portfolios)
+    with tab_download:
+        render_teacher_download(roster, portfolios)
+
+    with st.expander("Google Sheets 연결 상태", expanded=False):
+        st.caption("앱은 서비스 계정으로 학생명단 · 주차설정 · 포트폴리오 시트를 읽고 씁니다.")
+        if st.button("데이터 캐시 새로고침"):
+            invalidate_data_cache()
+            st.rerun()
+
+
+# ============================================================
+# 초기화 / 메인
+# ============================================================
+def main() -> None:
+    st.set_page_config(
+        page_title=APP_TITLE,
+        page_icon="📚",
+        layout="wide",
+        initial_sidebar_state="collapsed",
     )
+    inject_css()
+    init_state()
 
-# -----------------------------
-# 아주 작은 하단 표시
-# -----------------------------
-st.markdown(
-    "<div style='height:8px'></div><div class='footer-note'>Tech · Home Economics · Orientation Game</div>",
-    unsafe_allow_html=True,
-)
+    if not st.session_state.get("role"):
+        render_login()
+        return
+
+    # 연결을 실제로 열어 초기 오류를 숨기지 않고 바로 안내합니다.
+    try:
+        config = _get_gsheets_config()
+        spreadsheet_ref = config.get("spreadsheet") or config.get("spreadsheet_url") or config.get("spreadsheet_id")
+        if not spreadsheet_ref:
+            raise RuntimeError("[connections.gsheets]에 spreadsheet, spreadsheet_url 또는 spreadsheet_id를 설정하세요.")
+        get_spreadsheet(str(spreadsheet_ref))
+    except Exception as exc:
+        st.error("Google Sheets 연결 설정을 확인해 주세요.")
+        with st.expander("진단 정보"):
+            st.code(str(exc))
+        return
+
+    if st.session_state["role"] == "student":
+        render_student()
+    elif st.session_state["role"] == "teacher":
+        render_teacher()
+    else:
+        reset_session()
+
+
+if __name__ == "__main__":
+    main()
