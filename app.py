@@ -19,6 +19,7 @@ from gspread.exceptions import APIError, WorksheetNotFound
 # 기본 설정
 # ============================================================
 APP_TITLE = "기술·가정 포트폴리오"
+DEFAULT_SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1TM-90ev9Weibwqnq1xOhOQZCP78kNHANF_p4W2XZJMo/edit"
 WEEKS = list(range(1, 18))
 KST = ZoneInfo("Asia/Seoul")
 SCOPES = [
@@ -82,12 +83,44 @@ def hash_password(password: str) -> str:
 # Google Sheets 연결
 # ============================================================
 def _get_gsheets_config() -> Dict[str, Any]:
-    """Streamlit Secrets의 [connections.gsheets] 설정을 일반 dict로 반환합니다."""
+    """
+    Google Sheets/서비스 계정 Secrets를 하나의 설정으로 합칩니다.
+
+    지원 형식
+    1) [connections.gsheets] 안에 spreadsheet + 서비스 계정 키를 모두 넣는 기존 형식
+    2) [connections.gsheets]에는 spreadsheet만 넣고, [gcp_service_account]에
+       서비스 계정 키를 넣는 권장 형식
+    3) 사용자가 실수로 spreadsheet를 [gcp_service_account] 아래에 넣은 경우도 호환
+    """
     try:
         connections = st.secrets.get("connections", {})
-        config = dict(connections.get("gsheets", {})) if connections else {}
+        gsheets = dict(connections.get("gsheets", {})) if connections else {}
+        gcp = dict(st.secrets.get("gcp_service_account", {}))
     except Exception as exc:
-        raise RuntimeError("Streamlit Secrets에서 [connections.gsheets]를 읽지 못했습니다.") from exc
+        raise RuntimeError(
+            "Streamlit Secrets를 읽지 못했습니다. [connections.gsheets] 또는 [gcp_service_account] 설정을 확인하세요."
+        ) from exc
+
+    # 권장 구조를 우선하고, 없는 값은 다른 섹션에서 보완합니다.
+    config: Dict[str, Any] = dict(gcp)
+    config.update(gsheets)
+
+    # spreadsheet가 gcp_service_account 쪽에 들어간 현재 사용자 설정도 허용합니다.
+    spreadsheet_ref = (
+        gsheets.get("spreadsheet")
+        or gsheets.get("spreadsheet_url")
+        or gsheets.get("spreadsheet_id")
+        or gcp.get("spreadsheet")
+        or gcp.get("spreadsheet_url")
+        or gcp.get("spreadsheet_id")
+    )
+    if spreadsheet_ref:
+        config["spreadsheet"] = spreadsheet_ref
+    else:
+        # 시트 주소는 공개 식별자이므로 기본값으로 앱에 포함할 수 있습니다.
+        # Secrets에 spreadsheet 값을 넣으면 그 값이 우선됩니다.
+        config["spreadsheet"] = DEFAULT_SPREADSHEET_URL
+
     return config
 
 
@@ -110,7 +143,9 @@ def get_gspread_client() -> gspread.Client:
     missing = [key for key in required if not config.get(key)]
     if missing:
         raise RuntimeError(
-            "Google 서비스 계정 Secrets가 부족합니다. 누락된 항목: " + ", ".join(missing)
+            "Google 서비스 계정 Secrets가 부족합니다. "
+            "[gcp_service_account] 또는 [connections.gsheets]에 "
+            "다음 항목을 추가하세요: " + ", ".join(missing)
         )
 
     spreadsheet_ref = config.get("spreadsheet") or config.get("spreadsheet_url") or config.get("spreadsheet_id")
